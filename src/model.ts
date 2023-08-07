@@ -51,7 +51,13 @@ export function createLanguageModel(env: Record<string, string | undefined>): Ty
         const endPoint = env.AZURE_OPENAI_ENDPOINT ?? missingEnvironmentVariable("AZURE_OPENAI_ENDPOINT");
         return createAzureOpenAILanguageModel(apiKey, endPoint);
     }
-    missingEnvironmentVariable("OPENAI_API_KEY or AZURE_OPENAI_API_KEY");
+    if (env.PREDIBASE_API_KEY) {
+        const apiKey = env.PREDIBASE_API_KEY ?? missingEnvironmentVariable("PREDIBASE_API_KEY");
+        const model = env.PREDIBASE_MODEL ?? missingEnvironmentVariable("PREDIBASE_MODEL");
+        const endPoint = env.PREDIBASE_ENDPOINT ?? "https://api.app.predibase.com/v1/prompt";
+        return createPredibaseLanguageModel(apiKey, model, endPoint);
+    }
+    missingEnvironmentVariable("OPENAI_API_KEY, AZURE_OPENAI_API_KEY or PREDIBASE_API_KEY");
 }
 
 /**
@@ -107,6 +113,43 @@ function createAxiosLanguageModel(url: string, config: object, defaultParams: Re
             const result = await client.post(url, params, { validateStatus: status => true });
             if (result.status === 200) {
                 return success(result.data.choices[0].message?.content ?? "");
+            }
+            if (!isTransientHttpError(result.status) || retryCount >= retryMaxAttempts) {
+                return error(`REST API error ${result.status}: ${result.statusText}`);
+            }
+            await sleep(retryPauseMs);
+            retryCount++;
+        }
+    }
+}
+
+export function createPredibaseLanguageModel(apiKey: string, model_name: string, endPoint = "https://api.app.predibase.com/v1/prompt"): TypeChatLanguageModel {
+    return createPredibaseAxiosLanguageModel(endPoint, {
+        headers: {
+            Authorization: `Bearer ${apiKey}`
+        }
+    }, { model_name: [model_name], options: {temperature: 0.1, max_new_tokens: 512} });
+}
+
+function createPredibaseAxiosLanguageModel(url: string, config: object, defaultParams: Record<string, string | string[] | Record<string, any>>) {
+    const client = axios.create(config);
+    const model: TypeChatLanguageModel = {
+        complete
+    };
+    return model;
+
+    async function complete(prompt: string) {
+        let retryCount = 0;
+        const retryMaxAttempts = model.retryMaxAttempts ?? 3;
+        const retryPauseMs = model.retryPauseMs ?? 1000;
+        while (true) {
+            const params = {
+                ...defaultParams,
+                templates: [prompt.replaceAll("'", "''")],
+            };
+            const result = await client.post(url, params, { validateStatus: status => true });
+            if (result.status === 200) {
+                return success(result.data.responses[0].response ?? "");
             }
             if (!isTransientHttpError(result.status) || retryCount >= retryMaxAttempts) {
                 return error(`REST API error ${result.status}: ${result.statusText}`);
